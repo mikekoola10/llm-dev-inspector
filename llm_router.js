@@ -1,6 +1,10 @@
 // LLM Router Core Module
 
+import { callNemotron, callDeepSeek, callOpenAI, callNotebookLLM } from './llm_clients.js';
+import { normalizeOutput } from './output_normalizer.js';
+
 // Stub for reading the policy file (in a real extension, this would be loaded from storage/config)
+// NOTE: This should be loaded from config/llm-policy.json
 const POLICY = {
   mode: "normal", // or "nemotron_only"
   allow: ["nemotron", "deepseek", "openai"],
@@ -8,8 +12,15 @@ const POLICY = {
   reason: ""
 };
 
-// Stub for the Nemotron-3 endpoint
-const NEMOTRON_ENDPOINT = "http://127.0.0.1:8000/v1/completions";
+// Stub for audit logging (in a real extension, this would write to a persistent log)
+function auditLog(entry) {
+    const logEntry = {
+        timestamp: new Date().toISOString(),
+        ...entry
+    };
+    console.log("AUDIT LOG:", logEntry);
+    // TODO: Implement persistent logging (e.g., IndexedDB or a remote service)
+}
 
 /**
  * Routes the analysis request to the appropriate LLM authority based on policy and task type.
@@ -21,6 +32,11 @@ export async function routeRequest(request) {
 
     // 1. Policy Check (Nemotron-Only Guard)
     if (POLICY.mode === "nemotron_only" && request.taskType !== "security_audit" && request.taskType !== "core_refactor") {
+        auditLog({
+            action: "POLICY_BLOCK",
+            taskType: request.taskType,
+            reason: "Nemotron-only mode active."
+        });
         return {
             status: "POLICY_BLOCKED",
             message: "Policy violation: Nemotron-only mode active for critical tasks.",
@@ -33,52 +49,85 @@ export async function routeRequest(request) {
         case "security_audit":
         case "core_refactor":
             // High-risk changes require Nemotron-3 + DeepSeek consensus
-            return await handleConsensusRequest(request, ["nemotron", "deepseek"]);
+            return await handleConsensusRequest(request, [callNemotron, callDeepSeek]);
 
         case "ux_review":
         case "readability_check":
-            // Non-critical, use OpenAI (stubbed as DeepSeek for now)
-            return await handleSingleModelRequest(request, "deepseek");
+            // Non-critical, use OpenAI
+            return await handleSingleModelRequest(request, callOpenAI);
 
         case "testing_prototype":
-            // Local testing, route to Notebook LLMs (stubbed as a local process)
-            return await handleNotebookLLMRequest(request);
+            // Local testing, route to Notebook LLMs
+            return await handleSingleModelRequest(request, callNotebookLLM);
 
         case "data_fetch":
             // Data source, route to Chrome DevTools Agent (handled by background script)
             return await handleDevToolsAgentRequest(request);
 
         default:
-            return await handleSingleModelRequest(request, "nemotron");
+            // Default to Nemotron for safety
+            return await handleSingleModelRequest(request, callNemotron);
     }
 }
 
 /**
  * Handles requests that require consensus between Nemotron-3 and DeepSeek.
  */
-async function handleConsensusRequest(request, models) {
-    console.log(`Handling consensus request for models: ${models.join(', ')}`);
+async function handleConsensusRequest(request, modelCallers) {
+    console.log(`Handling consensus request for models: Nemotron-3 and DeepSeek`);
     
-    // STUB: Simulate parallel calls and a consensus check
-    const nemotronResponse = await callNemotron(request);
-    const deepseekResponse = await callDeepSeek(request);
+    const [nemotronRaw, deepseekRaw] = await Promise.all([
+        modelCallers[0](request), // Nemotron
+        modelCallers[1](request)  // DeepSeek
+    ]);
 
-    // STUB: Simple consensus check
-    if (nemotronResponse.riskLevel === deepseekResponse.riskLevel) {
+    const nemotron = normalizeOutput(nemotronRaw);
+    const deepseek = normalizeOutput(deepseekRaw);
+
+    auditLog({
+        action: "CONSENSUS_CHECK",
+        taskType: request.taskType,
+        nemotron_risk: nemotron.riskLevel,
+        deepseek_risk: deepseek.riskLevel
+    });
+
+    // Consensus Check: Do they agree on the risk level?
+    if (nemotron.riskLevel === deepseek.riskLevel && nemotron.riskLevel !== "HIGH") {
+        // Consensus reached on LOW/MEDIUM risk. Nemotron is final arbiter for patch.
         return {
             status: "CONSENSUS_REACHED",
             arbiter: "Nemotron-3",
-            nemotron: nemotronResponse,
-            deepseek: deepseekResponse,
-            final_patch: nemotronResponse.safePatch // Nemotron is final arbiter
+            nemotron: nemotron,
+            deepseek: deepseek,
+            final_patch: nemotron.safePatch,
+            confidence: (nemotron.confidence + deepseek.confidence) / 2
+        };
+    } else if (nemotron.riskLevel === "HIGH" && deepseek.riskLevel === "HIGH") {
+        // Consensus reached on HIGH risk. Requires manual confirmation.
+        return {
+            status: "HIGH_RISK_CONSENSUS",
+            message: "HIGH-risk change confirmed by both Nemotron-3 and DeepSeek. Manual confirmation required.",
+            arbiter: "Nemotron-3",
+            nemotron: nemotron,
+            deepseek: deepseek,
+            final_patch: nemotron.safePatch,
+            confidence: (nemotron.confidence + deepseek.confidence) / 2
         };
     } else {
+        // Disagreement or one suggests HIGH risk. Halt and report.
+        auditLog({
+            action: "DISAGREEMENT_HALT",
+            taskType: request.taskType,
+            nemotron_risk: nemotron.riskLevel,
+            deepseek_risk: deepseek.riskLevel
+        });
         return {
             status: "DISAGREEMENT_HALTED",
             message: "High-risk change halted due to Nemotron-3 and DeepSeek disagreement. Manual review required.",
             arbiter: "Nemotron-3",
-            nemotron: nemotronResponse,
-            deepseek: deepseekResponse
+            nemotron: nemotron,
+            deepseek: deepseek,
+            confidence: 0.0
         };
     }
 }
@@ -86,71 +135,28 @@ async function handleConsensusRequest(request, models) {
 /**
  * Handles requests that only need a single model response.
  */
-async function handleSingleModelRequest(request, model) {
-    console.log(`Handling single model request for: ${model}`);
-    
-    let response;
-    switch (model) {
-        case "nemotron":
-            response = await callNemotron(request);
-            break;
-        case "deepseek":
-        case "openai": // Stubbing OpenAI call via DeepSeek logic for now
-            response = await callDeepSeek(request);
-            break;
-        default:
-            response = { status: "ERROR", message: "Invalid model specified." };
-    }
+async function handleSingleModelRequest(request, modelCaller) {
+    const rawResponse = await modelCaller(request);
+    const normalized = normalizeOutput(rawResponse);
+
+    auditLog({
+        action: "SINGLE_MODEL_CALL",
+        taskType: request.taskType,
+        model: normalized.model,
+        risk: normalized.riskLevel
+    });
 
     return {
         status: "SINGLE_MODEL_RESPONSE",
-        model: model,
-        response: response
-    };
-}
-
-// --- Authority Call Stubs ---
-
-async function callNemotron(request) {
-    console.log(`Calling Nemotron-3 at ${NEMOTRON_ENDPOINT}`);
-    // STUB: Simulate a call to the local Nemotron-3 endpoint
-    return {
-        issues: ["Security vulnerability in XSS filter."],
-        rootCause: ["Improper sanitization of user input in component Y."],
-        safePatch: "```diff\n+ function sanitize(input) { return DOMPurify.sanitize(input); }\n```",
-        riskLevel: "HIGH",
-        confidence: 0.95
-    };
-}
-
-async function callDeepSeek(request) {
-    console.log("Calling DeepSeek API");
-    // STUB: Simulate a call to the DeepSeek API
-    return {
-        issues: ["Code is not idiomatic JavaScript."],
-        rootCause: ["Developer used old-style 'var' instead of 'const/let'."],
-        safePatch: "```diff\n- var i = 0;\n+ let i = 0;\n```",
-        riskLevel: "LOW",
-        confidence: 0.80
-    };
-}
-
-async function handleNotebookLLMRequest(request) {
-    console.log("Routing to Notebook LLMs (Local Process Stub)");
-    // STUB: Simulate a local Jupyter/Notebook LLM process
-    return {
-        status: "NOTEBOOK_LLM_STUB",
-        message: "Analysis queued for local Jupyter environment.",
-        result: {
-            test_pass: true,
-            notebook_link: "file:///path/to/test.ipynb"
-        }
+        model: normalized.model,
+        response: normalized
     };
 }
 
 async function handleDevToolsAgentRequest(request) {
     console.log("Routing to Chrome DevTools Agent (Data Fetch)");
-    // STUB: This request is typically handled by the background script messaging the content script
+    // This is a placeholder. Actual data fetching is handled by the background script
+    // communicating with the content script and DevTools API.
     return {
         status: "DEVICETOOLS_AGENT_STUB",
         message: "Data fetch request sent to inspected page.",

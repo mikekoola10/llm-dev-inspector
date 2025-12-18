@@ -1,9 +1,9 @@
 ### Phase 1 — Backend (Critical Path)
-- [ ] Replace DeepSeek stub with live API call
-- [ ] Replace OpenAI stub with live API call
-- [ ] Implement normalized output parser
-- [ ] Add confidence scoring
-- [ ] Add audit logging (model, hash, timestamp)
+- [x] Replace DeepSeek stub with live API call
+- [x] Replace OpenAI stub with live API call
+- [x] Implement normalized output parser
+- [x] Add confidence scoring
+- [x] Add audit logging (model, hash, timestamp)
 
 ### Phase 2 — LLM Router
 - [ ] Auto-routing by task type
