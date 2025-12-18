@@ -1,10 +1,13 @@
 // LLM Router Core Module
 
+import { auditLog } from './audit_log.js';
 import { callNemotron, callDeepSeek, callOpenAI, callNotebookLLM } from './llm_clients.js';
 import { normalizeOutput } from './output_normalizer.js';
 
 // Stub for reading the policy file (in a real extension, this would be loaded from storage/config)
 // NOTE: This should be loaded from config/llm-policy.json
+// Stub for Nemotron-3's hard override (fail-closed)
+const NEMOTRON_OVERRIDE_ENABLED = true;
 const POLICY = {
   mode: "normal", // or "nemotron_only"
   allow: ["nemotron", "deepseek", "openai"],
@@ -13,14 +16,7 @@ const POLICY = {
 };
 
 // Stub for audit logging (in a real extension, this would write to a persistent log)
-function auditLog(entry) {
-    const logEntry = {
-        timestamp: new Date().toISOString(),
-        ...entry
-    };
-    console.log("AUDIT LOG:", logEntry);
-    // TODO: Implement persistent logging (e.g., IndexedDB or a remote service)
-}
+// function auditLog(entry) { ... } // Now imported from audit_log.js
 
 /**
  * Routes the analysis request to the appropriate LLM authority based on policy and task type.
@@ -94,6 +90,14 @@ async function handleConsensusRequest(request, modelCallers) {
     // Consensus Check: Do they agree on the risk level?
     if (nemotron.riskLevel === deepseek.riskLevel && nemotron.riskLevel !== "HIGH") {
         // Consensus reached on LOW/MEDIUM risk. Nemotron is final arbiter for patch.
+        // Enforce Nemotron-3 as hard final arbiter (explicit override)
+        if (NEMOTRON_OVERRIDE_ENABLED) {
+            auditLog({
+                action: "NEMOTRON_OVERRIDE",
+                taskType: request.taskType,
+                reason: "Nemotron-3 patch explicitly chosen as final arbiter."
+            });
+        }
         return {
             status: "CONSENSUS_REACHED",
             arbiter: "Nemotron-3",
@@ -115,6 +119,23 @@ async function handleConsensusRequest(request, modelCallers) {
         };
     } else {
         // Disagreement or one suggests HIGH risk. Halt and report.
+        // Fail-closed behavior: If there is any disagreement on a high-risk change, or if Nemotron-3 suggests HIGH risk,
+        // the system must fail-closed and require manual review.
+        if (NEMOTRON_OVERRIDE_ENABLED && nemotron.riskLevel === "HIGH") {
+            auditLog({
+                action: "FAIL_CLOSED_HIGH_RISK",
+                taskType: request.taskType,
+                reason: "Nemotron-3 suggested HIGH risk. System failed closed."
+            });
+            return {
+                status: "FAIL_CLOSED_HALTED",
+                message: "Nemotron-3 suggested HIGH risk. System failed closed. Manual review required.",
+                arbiter: "Nemotron-3",
+                nemotron: nemotron,
+                deepseek: deepseek,
+                confidence: 0.0
+            };
+        }
         auditLog({
             action: "DISAGREEMENT_HALT",
             taskType: request.taskType,
@@ -151,6 +172,74 @@ async function handleSingleModelRequest(request, modelCaller) {
         model: normalized.model,
         response: normalized
     };
+}
+
+async function handleDevToolsAgentRequest(request) {
+    console.log("Routing to Chrome DevTools Agent (Data Fetch)");
+    // This is a placeholder. Actual data fetching is handled by the background script
+    // communicating with the content script and DevTools API.
+    return {
+        status: "DEVICETOOLS_AGENT_STUB",
+        message: "Data fetch request sent to inspected page.",
+        data_type: request.dataType
+    };
+}
+
+// --- Demonstration Function ---
+
+/**
+ * Simulates a high-risk disagreement scenario and logs the result.
+ * This demonstrates the fail-closed arbitration logic.
+ */
+export async function demonstrateArbitration() {
+    console.log("\n--- DEMONSTRATING ARBITRATION (HIGH-RISK DISAGREEMENT) ---");
+    
+    // Temporarily override client stubs to force a disagreement
+    const originalNemotron = callNemotron;
+    const originalDeepseek = callDeepseek;
+
+    // Nemotron suggests HIGH risk
+    global.callNemotron = async (req) => ({
+        model: "Nemotron-3",
+        created_at: new Date().toISOString(),
+        usage: { prompt_tokens: 100, completion_tokens: 50 },
+        content: JSON.stringify({
+            issues: ["CRITICAL: XSS vulnerability found."],
+            root_cause: ["Improper sanitization."],
+            safe_patch: "Nemotron's HIGH-RISK PATCH",
+            risk_level: "HIGH",
+            confidence_score: 0.99
+        })
+    });
+
+    // DeepSeek suggests LOW risk
+    global.callDeepseek = async (req) => ({
+        model: "DeepSeek",
+        created_at: new Date().toISOString(),
+        usage: { prompt_tokens: 100, completion_tokens: 50 },
+        content: JSON.stringify({
+            issues: ["Minor: Typo in comment."],
+            root_cause: ["Developer error."],
+            safe_patch: "DeepSeek's LOW-RISK PATCH",
+            risk_level: "LOW",
+            confidence_score: 0.80
+        })
+    });
+
+    const request = { taskType: "security_audit", payload: "..." };
+    const result = await handleConsensusRequest(request, [global.callNemotron, global.callDeepseek]);
+
+    console.log("\n--- ARBITRATION RESULT ---");
+    console.log("Status:", result.status);
+    console.log("Message:", result.message);
+    console.log("Nemotron Risk:", result.nemotron.riskLevel);
+    console.log("DeepSeek Risk:", result.deepseek.riskLevel);
+    
+    // Restore original stubs
+    global.callNemotron = originalNemotron;
+    global.callDeepseek = originalDeepseek;
+
+    return result;
 }
 
 async function handleDevToolsAgentRequest(request) {

@@ -18,8 +18,10 @@ const REQUIRED_CONFIG = {
  */
 function isConfigSet(key) {
     // STUB: Simulate checking for configuration
-    // For now, we assume the user will set these up, so we return true.
-    // In a real implementation, this would be a check against a secure config store.
+    // To demonstrate fail-loudly behavior, we will make one component fail.
+    if (key === REQUIRED_CONFIG.Mike_AI) {
+        return false; // Simulate Mike_AI being missing/unconfigured
+    }
     return true; 
 }
 
@@ -49,6 +51,7 @@ export async function checkAuraAIVisibility() {
 
 /**
  * Runs all visibility checks and returns a status object.
+ * Fails loudly if any required component is missing.
  * @returns {Promise<object>}
  */
 export async function runAllVisibilityChecks() {
@@ -60,8 +63,15 @@ export async function runAllVisibilityChecks() {
 
     const allVisible = Object.values(results).every(v => v === true);
 
+    if (!allVisible) {
+        const missing = Object.keys(results).filter(key => results[key] === false);
+        const errorMessage = `CRITICAL FAILURE: Ecosystem component(s) missing or unconfigured: ${missing.join(', ')}. LLM Router will be blocked.`;
+        console.error(errorMessage);
+        throw new Error(errorMessage); // Fail loudly
+    }
+
     return {
-        status: allVisible ? "VISIBLE" : "PARTIAL_FAILURE",
+        status: "VISIBLE",
         details: results
     };
 }
