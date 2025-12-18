@@ -1,0 +1,6 @@
+{
+  "mode": "nemotron_only",
+  "allow": ["nemotron"],
+  "deny": ["openai", "deepseek"],
+  "reason": "enterprise_private_execution"
+}
